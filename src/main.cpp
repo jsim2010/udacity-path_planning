@@ -7,6 +7,7 @@
 #include "Eigen-3.3/Eigen/QR"
 #include "helpers.h"
 #include "json.hpp"
+#include "spline.h"
 
 // for convenience
 using nlohmann::json;
@@ -59,6 +60,8 @@ int main() {
     // The 2 signifies a websocket event
     if (length && length > 2 && data[0] == '4' && data[1] == '2') {
 
+			static double lane = 1;
+			static double desired_lane = 1;
       auto s = hasData(data);
 
       if (s != "") {
@@ -88,17 +91,173 @@ int main() {
           //   of the road.
           auto sensor_fusion = j[1]["sensor_fusion"];
 
-          json msgJson;
+					int prev_size = previous_path_x.size();
+				  double max_vel = 50.0;
+					double speed_adjustment = 0.0;
+					bool want_to_shift = false;
+					bool can_shift_left = false;
+					bool can_shift_right = false;
 
+					if (prev_size == 0) {
+						end_path_s = car_s;
+					}
+
+					// For each car
+					for (int i = 0; i < sensor_fusion.size(); i++) {
+						float other_d = sensor_fusion[i][6];
+
+						// If car is in same lane
+						if (other_d > (lane * 4) && other_d < ((lane + 1) * 4)) {
+							double vx = sensor_fusion[i][3];
+							double vy = sensor_fusion[i][4];
+							double other_speed = sqrt(vx*vx + vy*vy);
+							double other_s = sensor_fusion[i][5];
+							other_s += (double)prev_size * 0.02 * other_speed;
+							other_speed *= 2.24;
+
+							if ((other_s > end_path_s) && ((other_s - end_path_s) < 20) && (other_speed < max_vel)) {
+								// We must stay in our lane, so slow down to match the car in front of us.
+								max_vel = other_speed;
+								want_to_shift = true;
+							}
+						}
+					}
+
+					if (want_to_shift) {
+						if (lane == 0) {
+							can_shift_right = true;
+						} else if (lane == 1) {
+							can_shift_right = true;
+							can_shift_left = true;
+						} else {
+							can_shift_left = true;
+						}
+
+						for (int i = 0; i < sensor_fusion.size(); i++) {
+							float other_d = sensor_fusion[i][6];
+
+							if (other_d > ((lane - 1) * 4) && other_d < (lane * 4)) {
+								double vx = sensor_fusion[i][3];
+								double vy = sensor_fusion[i][4];
+								double other_speed = sqrt(vx*vx + vy*vy);
+								double other_s = sensor_fusion[i][5];
+								double other_end_s = other_s + (double)prev_size * 0.02 * other_speed;
+
+								if (other_s > (car_s - 10) && other_end_s < (end_path_s + 20)) {
+									can_shift_left = false;
+								}
+							}
+
+							if (other_d > ((lane + 1) * 4) && other_d < ((lane + 2) * 4)) {
+								double vx = sensor_fusion[i][3];
+								double vy = sensor_fusion[i][4];
+								double other_speed = sqrt(vx*vx + vy*vy);
+								double other_s = sensor_fusion[i][5];
+								double other_end_s = other_s + (double)prev_size * 0.02 * other_speed;
+
+								if (other_s > (car_s - 10) && other_end_s < (end_path_s + 20)) {
+									can_shift_right = false;
+								}
+							}
+						}
+					}
+
+					if (can_shift_right) {
+						lane += 1;
+					} else if (can_shift_left) {
+						lane -= 1;
+					}
+
+					// Use previous points that haven't been used.
           vector<double> next_x_vals;
           vector<double> next_y_vals;
 
-          /**
-           * TODO: define a path made up of (x,y) points that the car will visit
-           *   sequentially every .02 seconds
-           */
+					for (int i = 0; i < previous_path_x.size(); i++) {
+						next_x_vals.push_back(previous_path_x[i]);
+						next_y_vals.push_back(previous_path_y[i]);
+					}
 
+					// Build a path to use spline on.
+					vector<double> x_vals;
+					vector<double> y_vals;
+					vector<double> current_point;
+					vector<double> prev_point;
+					double start_yaw;
+					double speed;
 
+					if (prev_size > 0) {
+						current_point.push_back(previous_path_x[prev_size - 1]);
+						current_point.push_back(previous_path_y[prev_size - 1]);
+						prev_point.push_back(previous_path_x[prev_size - 2]);
+						prev_point.push_back(previous_path_y[prev_size - 2]);
+						double x_dist = current_point[0] - prev_point[0];
+						double y_dist = current_point[1] - prev_point[1];
+
+						start_yaw = atan2(y_dist, x_dist);
+						speed = sqrt(x_dist * x_dist + y_dist * y_dist) * 2.24 / 0.02;
+					} else {
+						current_point.push_back(car_x);
+						current_point.push_back(car_y);
+						prev_point.push_back(car_x - cos(car_yaw));
+						prev_point.push_back(car_y - sin(car_yaw));
+						start_yaw = car_yaw;
+						speed = car_speed;
+					}
+
+					x_vals.push_back(prev_point[0]);
+					y_vals.push_back(prev_point[1]);
+					x_vals.push_back(current_point[0]);
+					y_vals.push_back(current_point[1]);
+
+					for (int i = 0; i < 3; i++) {
+						vector<double> point = getXY(car_s + (50.0 * (i + 1)), (lane * 4) + 2, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+						x_vals.push_back(point[0]);
+						y_vals.push_back(point[1]);
+					}
+
+					// Transform path so that start is (0, 0) and yaw is 0.
+					for (int i = 0; i < x_vals.size(); i++) {
+						double shift_x = x_vals[i] - current_point[0];
+						double shift_y = y_vals[i] - current_point[1];
+
+						x_vals[i] = shift_x * cos(0 - start_yaw) - shift_y * sin(0 - start_yaw);
+						y_vals[i] = shift_x * sin(0 - start_yaw) + shift_y * cos(0 - start_yaw);
+					}
+
+					// Setup spline
+					tk::spline s;
+
+					s.set_points(x_vals, y_vals);
+
+					/// Fill up remaining points.
+					double target_x = 30.0;
+					double target_y = s(target_x);
+					double target_dist = sqrt((target_x * target_x) + (target_y * target_y));
+					double spline_x = 0.0;
+
+					for (int i = 0; i < 50 - prev_size; i++) {
+						if (speed < (max_vel - 1)) {
+							speed_adjustment = 0.25;
+						} else if (speed > (max_vel - 0.5)) {
+							speed_adjustment = -0.25;
+						} else {
+							speed_adjustment = 0.0;
+						}
+
+						speed += speed_adjustment;
+						double N = target_dist / (0.02 * speed / 2.24);
+						double x_inc = target_x / N;
+						spline_x += x_inc;
+						double spline_y = s(spline_x);
+
+						double x = spline_x * cos(start_yaw) - spline_y * sin(start_yaw) + current_point[0];
+						double y = spline_x * sin(start_yaw) + spline_y * cos(start_yaw) + current_point[1];
+
+						next_x_vals.push_back(x);
+						next_y_vals.push_back(y);
+					}
+					
+          json msgJson;
           msgJson["next_x"] = next_x_vals;
           msgJson["next_y"] = next_y_vals;
 
