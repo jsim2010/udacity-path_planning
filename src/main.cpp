@@ -62,6 +62,7 @@ int main() {
 
 			static double lane = 1;
 			static double desired_lane = 1;
+			static double speed_limit = 50.0;
       auto s = hasData(data);
 
       if (s != "") {
@@ -92,89 +93,101 @@ int main() {
           auto sensor_fusion = j[1]["sensor_fusion"];
 
 					int prev_size = previous_path_x.size();
-				  double max_vel = 50.0;
-					double speed_adjustment = 0.0;
-					bool want_to_shift = false;
-					bool can_shift_left = false;
-					bool can_shift_right = false;
+				  double max_speed = speed_limit;
+					bool shift_left = false;
+					bool shift_right = false;
 
-					if (prev_size == 0) {
-						end_path_s = car_s;
-					}
-
-					// For each car
-					for (int i = 0; i < sensor_fusion.size(); i++) {
-						float other_d = sensor_fusion[i][6];
-
-						// If car is in same lane
-						if (other_d > (lane * 4) && other_d < ((lane + 1) * 4)) {
-							double vx = sensor_fusion[i][3];
-							double vy = sensor_fusion[i][4];
-							double other_speed = sqrt(vx*vx + vy*vy);
-							double other_s = sensor_fusion[i][5];
-							other_s += (double)prev_size * 0.02 * other_speed;
-							other_speed *= 2.24;
-
-							if ((other_s > end_path_s) && ((other_s - end_path_s) < 20) && (other_speed < max_vel)) {
-								// We must stay in our lane, so slow down to match the car in front of us.
-								max_vel = other_speed;
-								want_to_shift = true;
-							}
-						}
-					}
-
-					if (want_to_shift) {
-						if (lane == 0) {
-							can_shift_right = true;
-						} else if (lane == 1) {
-							can_shift_right = true;
-							can_shift_left = true;
-						} else {
-							can_shift_left = true;
-						}
-
-						for (int i = 0; i < sensor_fusion.size(); i++) {
-							float other_d = sensor_fusion[i][6];
-
-							if (other_d > ((lane - 1) * 4) && other_d < (lane * 4)) {
-								double vx = sensor_fusion[i][3];
-								double vy = sensor_fusion[i][4];
-								double other_speed = sqrt(vx*vx + vy*vy);
-								double other_s = sensor_fusion[i][5];
-								double other_end_s = other_s + (double)prev_size * 0.02 * other_speed;
-
-								if (other_s > (car_s - 10) && other_end_s < (end_path_s + 20)) {
-									can_shift_left = false;
-								}
-							}
-
-							if (other_d > ((lane + 1) * 4) && other_d < ((lane + 2) * 4)) {
-								double vx = sensor_fusion[i][3];
-								double vy = sensor_fusion[i][4];
-								double other_speed = sqrt(vx*vx + vy*vy);
-								double other_s = sensor_fusion[i][5];
-								double other_end_s = other_s + (double)prev_size * 0.02 * other_speed;
-
-								if (other_s > (car_s - 10) && other_end_s < (end_path_s + 20)) {
-									can_shift_right = false;
-								}
-							}
-						}
-					}
-
-					if (can_shift_right) {
-						lane += 1;
-					} else if (can_shift_left) {
-						lane -= 1;
-					}
-
-					// Use previous points that haven't been used.
+					// Start with previous points that haven't been used.
           vector<double> next_x_vals;
           vector<double> next_y_vals;
 
 					for (int i = 0; i < previous_path_x.size(); i++) {
 						next_x_vals.push_back(previous_path_x[i]);
 						next_y_vals.push_back(previous_path_y[i]);
+					}
+
+					if (prev_size == 0) {
+						end_path_s = car_s;
+					}
+
+					// Collect data about other cars going in same direction
+					// Stores [s, end_s, speed] about each car.
+					vector<vector<vector<double>>> other_cars;
+
+					for (int i = 0; i < 3; i++) {
+						vector<vector<double>> lane;
+						other_cars.push_back(lane);
+					}
+
+					for (int i = 0; i < sensor_fusion.size(); i++) {
+						double other_lane = ((double)sensor_fusion[i][6]) / 4.0;
+
+						if (other_lane >= 0) {
+							double vx = sensor_fusion[i][3];
+							double vy = sensor_fusion[i][4];
+							double v = sqrt(vx * vx + vy * vy);
+							double other_s = sensor_fusion[i][5];
+							double other_end_s = other_s + ((double)prev_size) * 0.02 * v;
+							vector<double> other_car;
+
+							other_car.push_back(other_s);
+							other_car.push_back(other_end_s);
+							other_car.push_back(v * 2.24);
+							other_cars[other_lane].push_back(other_car);
+						}
+					}
+
+					// Check current lane for slower cars in front.
+					for (int i = 0; i < other_cars[lane].size(); i++) {
+						double other_end_s = other_cars[lane][i][1];
+						double other_speed = other_cars[lane][i][2];
+
+						if ((other_end_s > end_path_s) && ((other_end_s - end_path_s) < 20) && (other_speed < max_speed)) {
+							// Slow down to match the car in front.
+							max_speed = other_speed;
+						}
+					}
+
+					// If desired to switch lanes, find which ones are possible.
+					if (max_speed < speed_limit) {
+						// If lane exists to left.
+						if (lane > 0) {
+							shift_left = true;
+							int possible_lane = lane - 1;
+
+							for (int i = 0; i < other_cars[possible_lane].size(); i++) {
+								double other_s = other_cars[possible_lane][i][0];
+								double other_end_s = other_cars[possible_lane][i][1];
+
+								if (other_s > (car_s - 10) && other_end_s < (end_path_s + 20)) {
+									shift_left = false;
+									break;
+								}
+							}
+						}
+
+						// If lane exists to right.
+						if (lane < 2) {
+							shift_right = true;
+							int possible_lane = lane + 1;
+
+							for (int i = 0; i < other_cars[possible_lane].size(); i++) {
+								double other_s = other_cars[possible_lane][i][0];
+								double other_end_s = other_cars[possible_lane][i][1];
+
+								if (other_s > (car_s - 10) && other_end_s < (end_path_s + 20)) {
+									shift_right = false;
+									break;
+								}
+							}
+						}
+					}
+
+					// Change lanes.
+					if (shift_right) {
+						lane += 1;
+					} else if (shift_left) {
+						lane -= 1;
 					}
 
 					// Build a path to use spline on.
@@ -236,18 +249,15 @@ int main() {
 					double spline_x = 0.0;
 
 					for (int i = 0; i < 50 - prev_size; i++) {
-						if (speed < (max_vel - 1)) {
-							speed_adjustment = 0.25;
-						} else if (speed > (max_vel - 0.5)) {
-							speed_adjustment = -0.25;
-						} else {
-							speed_adjustment = 0.0;
+						// Adjust speed towards slightly under max_speed.
+						if (speed < (max_speed - 1)) {
+							speed += 0.25;
+						} else if (speed > (max_speed - 0.5)) {
+							speed -= 0.25;
 						}
 
-						speed += speed_adjustment;
 						double N = target_dist / (0.02 * speed / 2.24);
-						double x_inc = target_x / N;
-						spline_x += x_inc;
+						spline_x += target_x / N;
 						double spline_y = s(spline_x);
 
 						double x = spline_x * cos(start_yaw) - spline_y * sin(start_yaw) + current_point[0];
