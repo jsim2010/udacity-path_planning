@@ -1,5 +1,15 @@
 # CarND-Path-Planning-Project
 Self-Driving Car Engineer Nanodegree Program
+
+## Reflection
+
+The first decision I made was for the path planner to reuse previously calculated points that had not been used yet (the previous path points). This helped to keep the path smooth and reduced the amount of calculation needed.
+
+There are 2 variables that were used to control the path of the car. Its speed and the lane that it was going towards. For every point added to the path, the car's speed was determined by moving it towards a speed just under the calculated maximum speed. The rate at which the speed was adjusted was low enough to pass the acceleration and jerk checks. If there were no cars in front of the car, the maximum speed was set to the speed limit. However, if there was a car in front, then the maximum speed was set to match that car's speed.
+
+If the car's maximum speed was equal to the speed limit, it would not change lanes. Otherwise, it would check the lanes on either side of it to determine if it was possible to change to a lane. A lane change was possible if the lane was an existing lane on the right side of the road and it did not contain a car that could cause a collision. If a lane was found that matched all these criteria, the car would choose that lane.
+
+Once the car's speed and lane were determined, a spline was used to calculate a smooth path from the end of the car's current path to the desired lane. Then as many points as were needed to fill the path were calculated and added to the path points.
    
 ### Simulator.
 You can download the Term3 Simulator which contains the Path Planning Project from the [releases tab (https://github.com/udacity/self-driving-car-sim/releases/tag/T3_v1.2).  
